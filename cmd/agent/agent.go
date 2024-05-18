@@ -13,7 +13,7 @@ var (
 	tunnelFlag  = flag.String("tunnel", "", "Tunnel address")
 )
 
-func DialTCP(addrString string) (*net.TCPConn, error) {
+func dialTCP(addrString string) (*net.TCPConn, error) {
 	addr, err := net.ResolveTCPAddr("tcp", addrString)
 	if err != nil {
 		return nil, err
@@ -34,14 +34,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	service, err := DialTCP(*serviceFlag)
+	service, err := dialTCP(*serviceFlag)
 	if err != nil {
 		log.Fatalf("couldn't connect to service: %v\n", err)
 	} else {
 		defer service.Close()
 	}
 
-	tunnel, err := DialTCP(*tunnelFlag)
+	tunnel, err := dialTCP(*tunnelFlag)
 	if err != nil {
 		log.Fatalf("couldn't connec to tunnel: %v\n", err)
 	} else {
