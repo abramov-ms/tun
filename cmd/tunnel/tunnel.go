@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 )
 
 var (
@@ -63,12 +64,29 @@ func main() {
 			agent = conn
 			close(agentConnected)
 
+			go func() {
+				for {
+					buffer := make([]byte, 1024)
+					bytes, err := agent.Read(buffer[:])
+					if err != nil {
+						log.Printf("couldn't read from agent: %v\n", err)
+						return
+					}
+
+					egress <- buffer[:bytes]
+				}
+			}()
+
 			log.Println("connected to agent")
 			continue
 		}
 
+		var wg sync.WaitGroup
+
+		wg.Add(1)
 		go func(client *net.TCPConn) {
 			waitForAgent()
+			defer wg.Done()
 
 			for {
 				buffer := make([]byte, 1024)
@@ -79,14 +97,22 @@ func main() {
 				}
 
 				ingress <- buffer[:bytes]
+				if bytes == 0 {
+					return
+				}
 			}
 		}(conn)
 
+		wg.Add(1)
 		go func() {
 			waitForAgent()
+			defer wg.Done()
 
 			for {
 				message := <-ingress
+				if len(message) == 0 {
+					return
+				}
 
 				done := 0
 				for done < len(message) {
@@ -101,23 +127,10 @@ func main() {
 			}
 		}()
 
-		go func() {
-			waitForAgent()
-
-			for {
-				buffer := make([]byte, 1024)
-				bytes, err := agent.Read(buffer[:])
-				if err != nil {
-					log.Printf("couldn't read from agent: %v\n", err)
-					return
-				}
-
-				egress <- buffer[:bytes]
-			}
-		}()
-
+		wg.Add(1)
 		go func(client *net.TCPConn) {
 			waitForAgent()
+			defer wg.Done()
 
 			for {
 				message := <-egress
