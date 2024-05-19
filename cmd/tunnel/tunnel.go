@@ -55,6 +55,7 @@ func main() {
 		var wg sync.WaitGroup
 		ingress := make(chan []byte)
 		egress := make(chan []byte)
+		clientConnected := false
 
 		for {
 			conn, err := tunnel.AcceptTCP()
@@ -92,6 +93,14 @@ func main() {
 
 				log.Println("connected to agent")
 				continue
+			}
+
+			if clientConnected {
+				conn.Close()
+				log.Print("cannot handle more than one client at once")
+				continue
+			} else {
+				clientConnected = true
 			}
 
 			wg.Add(1)
@@ -172,7 +181,10 @@ func main() {
 				}
 			}(conn)
 
-			break
+			if agent != nil {
+				wg.Wait()
+				break
+			}
 		}
 	}
 }
