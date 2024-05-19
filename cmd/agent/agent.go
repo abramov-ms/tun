@@ -15,8 +15,8 @@ var (
 	tunnelFlag  = flag.String("tunnel", "", "Tunnel address")
 )
 
-func dialTCP(addrString string) (*net.TCPConn, error) {
-	addr, err := net.ResolveTCPAddr("tcp", addrString)
+func dialTCP(addrStr string) (*net.TCPConn, error) {
+	addr, err := net.ResolveTCPAddr("tcp", addrStr)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +38,7 @@ func main() {
 
 	tunnel, err := dialTCP(*tunnelFlag)
 	if err != nil {
-		log.Fatalf("couldn't connec to tunnel: %v\n", err)
+		log.Fatalf("couldn't connect to tunnel: %v\n", err)
 	}
 
 	for {
@@ -118,9 +118,7 @@ func main() {
 
 		wg.Add(1)
 		go func() {
-			defer func() {
-				wg.Done()
-			}()
+			defer wg.Done()
 
 			for buffer := range egress {
 				message := protocol.Message{
