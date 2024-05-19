@@ -2,6 +2,7 @@ package agent
 
 import (
 	"flag"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -34,96 +35,119 @@ func main() {
 		os.Exit(1)
 	}
 
-	service, err := dialTCP(*serviceFlag)
-	if err != nil {
-		log.Fatalf("couldn't connect to service: %v\n", err)
-	} else {
-		defer service.Close()
-	}
-
-	tunnel, err := dialTCP(*tunnelFlag)
-	if err != nil {
-		log.Fatalf("couldn't connec to tunnel: %v\n", err)
-	} else {
-		defer tunnel.Close()
-	}
-
-	ingress := make(chan []byte)
-	egress := make(chan []byte)
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		for {
-			buffer := make([]byte, 1024)
-			bytes, err := tunnel.Read(buffer)
-			if err != nil {
-				log.Printf("error reading from client: %v\n", err)
-				return
-			}
-
-			ingress <- buffer[:bytes]
+	for {
+		service, err := dialTCP(*serviceFlag)
+		if err != nil {
+			log.Fatalf("couldn't connect to service: %v\n", err)
 		}
-	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+		tunnel, err := dialTCP(*tunnelFlag)
+		if err != nil {
+			log.Fatalf("couldn't connec to tunnel: %v\n", err)
+		}
 
-		for {
-			message := <-ingress
+		ingress := make(chan []byte)
+		egress := make(chan []byte)
+		var wg sync.WaitGroup
 
-			done := 0
-			for done < len(message) {
-				bytes, err := service.Write(message[done:])
+		wg.Add(1)
+		go func() {
+			defer func() {
+				tunnel.CloseRead()
+				close(ingress)
+				wg.Done()
+			}()
+
+			for {
+				buffer := make([]byte, 1024)
+				bytes, err := tunnel.Read(buffer)
 				if err != nil {
-					log.Printf("error sending to service: %v\n", err)
+					if err != io.EOF {
+						log.Printf("error reading from tunnel: %v\n", err)
+					}
+
 					return
 				}
 
-				done += bytes
+				ingress <- buffer[:bytes]
 			}
-		}
-	}()
+		}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+		wg.Add(1)
+		go func() {
+			defer func() {
+				service.CloseWrite()
+				wg.Done()
+			}()
 
-		for {
-			buffer := make([]byte, 1024)
-			bytes, err := service.Read(buffer)
-			if err != nil {
-				log.Printf("error reading from service: %v\n", err)
-				return
-			}
-
-			egress <- buffer[:bytes]
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		for {
-			message := <-egress
-
-			done := 0
-			for done < len(message) {
-				bytes, err := tunnel.Write(message[done:])
-				if err != nil {
-					log.Printf("error sending to tunnel: %v\n", err)
+			for {
+				message, ok := <-ingress
+				if !ok {
 					return
 				}
 
-				done += bytes
-			}
-		}
-	}()
+				done := 0
+				for done < len(message) {
+					bytes, err := service.Write(message[done:])
+					if err != nil {
+						log.Printf("error sending to service: %v\n", err)
+						return
+					}
 
-	wg.Wait()
-	os.Exit(1)
+					done += bytes
+				}
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer func() {
+				service.CloseRead()
+				close(egress)
+				wg.Done()
+			}()
+
+			for {
+				buffer := make([]byte, 1024)
+				bytes, err := service.Read(buffer)
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("error reading from service: %v\n", err)
+					}
+
+					return
+				}
+
+				egress <- buffer[:bytes]
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer func() {
+				tunnel.CloseWrite()
+				wg.Done()
+			}()
+
+			for {
+				message, ok := <-egress
+				if !ok {
+					return
+				}
+
+				done := 0
+				for done < len(message) {
+					bytes, err := tunnel.Write(message[done:])
+					if err != nil {
+						log.Printf("error sending to tunnel: %v\n", err)
+						return
+					}
+
+					done += bytes
+				}
+			}
+		}()
+
+		wg.Wait()
+	}
 }

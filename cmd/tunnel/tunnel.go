@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"flag"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -44,108 +45,134 @@ func main() {
 		log.Fatalf("couldn't resolve agent address: %v\n", err)
 	}
 
-	var agent *net.TCPConn
-	agentConnected := make(chan struct{})
-	waitForAgent := func() {
-		_, _ = <-agentConnected
-	}
-
-	ingress := make(chan []byte)
-	egress := make(chan []byte)
-
 	for {
-		conn, err := tunnel.AcceptTCP()
-		if err != nil {
-			log.Printf("error accepting connection: %v\n", err)
-			continue
-		}
-
-		if conn.RemoteAddr().String() == agentAddr.String() {
-			agent = conn
-			close(agentConnected)
-
-			go func() {
-				for {
-					buffer := make([]byte, 1024)
-					bytes, err := agent.Read(buffer[:])
-					if err != nil {
-						log.Printf("couldn't read from agent: %v\n", err)
-						return
-					}
-
-					egress <- buffer[:bytes]
-				}
-			}()
-
-			log.Println("connected to agent")
-			continue
+		var agent *net.TCPConn
+		agentConnected := make(chan struct{})
+		waitForAgent := func() {
+			_, _ = <-agentConnected
 		}
 
 		var wg sync.WaitGroup
+		ingress := make(chan []byte)
+		egress := make(chan []byte)
 
-		wg.Add(1)
-		go func(client *net.TCPConn) {
-			waitForAgent()
-			defer wg.Done()
-
-			for {
-				buffer := make([]byte, 1024)
-				bytes, err := client.Read(buffer[:])
-				if err != nil {
-					log.Printf("couldn't read from client: %v\n", err)
-					return
-				}
-
-				ingress <- buffer[:bytes]
-				if bytes == 0 {
-					return
-				}
+		for {
+			conn, err := tunnel.AcceptTCP()
+			if err != nil {
+				log.Printf("error accepting connection: %v\n", err)
+				continue
 			}
-		}(conn)
 
-		wg.Add(1)
-		go func() {
-			waitForAgent()
-			defer wg.Done()
+			if conn.RemoteAddr().String() == agentAddr.String() {
+				agent = conn
+				close(agentConnected)
 
-			for {
-				message := <-ingress
-				if len(message) == 0 {
-					return
-				}
+				wg.Add(1)
+				go func() {
+					defer func() {
+						agent.CloseRead()
+						close(egress)
+						wg.Done()
+					}()
 
-				done := 0
-				for done < len(message) {
-					bytes, err := agent.Write(message[done:])
+					for {
+						buffer := make([]byte, 1024)
+						bytes, err := agent.Read(buffer[:])
+						if err != nil {
+							if err != io.EOF {
+								log.Printf("couldn't read from agent: %v\n", err)
+							}
+
+							return
+						}
+
+						egress <- buffer[:bytes]
+					}
+				}()
+
+				log.Println("connected to agent")
+				continue
+			}
+
+			wg.Add(1)
+			go func(client *net.TCPConn) {
+				waitForAgent()
+				defer func() {
+					client.CloseRead()
+					close(ingress)
+					wg.Done()
+				}()
+
+				for {
+					buffer := make([]byte, 1024)
+					bytes, err := client.Read(buffer[:])
 					if err != nil {
-						log.Printf("error writing to agent: %v\n", err)
+						if err != io.EOF {
+							log.Printf("couldn't read from client: %v\n", err)
+						}
+
 						return
 					}
 
-					done += bytes
+					ingress <- buffer[:bytes]
 				}
-			}
-		}()
+			}(conn)
 
-		wg.Add(1)
-		go func(client *net.TCPConn) {
-			waitForAgent()
-			defer wg.Done()
+			wg.Add(1)
+			go func() {
+				waitForAgent()
+				defer func() {
+					agent.CloseWrite()
+					wg.Done()
+				}()
 
-			for {
-				message := <-egress
-
-				done := 0
-				for done < len(message) {
-					bytes, err := client.Write(message[done:])
-					if err != nil {
-						log.Printf("error writing to client: %v\n", err)
+				for {
+					message, ok := <-ingress
+					if !ok {
 						return
 					}
 
-					done += bytes
+					done := 0
+					for done < len(message) {
+						bytes, err := agent.Write(message[done:])
+						if err != nil {
+							log.Printf("error writing to agent: %v\n", err)
+							return
+						}
+
+						done += bytes
+					}
 				}
-			}
-		}(conn)
+			}()
+
+			wg.Add(1)
+			go func(client *net.TCPConn) {
+				waitForAgent()
+				defer func() {
+					client.CloseWrite()
+					wg.Done()
+				}()
+
+				for {
+					message, ok := <-egress
+					if !ok {
+						return
+					}
+
+					done := 0
+					for done < len(message) {
+						bytes, err := client.Write(message[done:])
+						if err != nil {
+							log.Printf("error writing to client: %v\n", err)
+							return
+						}
+
+						done += bytes
+					}
+				}
+			}(conn)
+
+			break
+		}
 	}
 }
