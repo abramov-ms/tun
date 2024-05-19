@@ -47,6 +47,8 @@ func main() {
 			log.Fatalf("couldn't connect to service: %v\n", err)
 		}
 
+		log.Println("connected to service")
+
 		ingress := make(chan []byte)
 		egress := make(chan []byte)
 		var wg sync.WaitGroup
