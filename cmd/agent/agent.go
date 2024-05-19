@@ -60,7 +60,7 @@ func main() {
 			buffer := make([]byte, 1024)
 			bytes, err := tunnel.Read(buffer)
 			if err != nil {
-				log.Print("error reading from client: %v\n", err)
+				log.Printf("error reading from client: %v\n", err)
 				return
 			}
 
@@ -79,7 +79,7 @@ func main() {
 			for done < len(message) {
 				bytes, err := service.Write(message[done:])
 				if err != nil {
-					log.Print("error sending to service: %v\n", err)
+					log.Printf("error sending to service: %v\n", err)
 					return
 				}
 
@@ -96,7 +96,7 @@ func main() {
 			buffer := make([]byte, 1024)
 			bytes, err := service.Read(buffer)
 			if err != nil {
-				log.Print("error reading from service: %v\n", err)
+				log.Printf("error reading from service: %v\n", err)
 				return
 			}
 
@@ -115,7 +115,7 @@ func main() {
 			for done < len(message) {
 				bytes, err := tunnel.Write(message[done:])
 				if err != nil {
-					log.Print("error sending to tunnel: %v\n", err)
+					log.Printf("error sending to tunnel: %v\n", err)
 					return
 				}
 
