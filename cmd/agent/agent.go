@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	protocol "tun/internal"
 )
 
 var (
@@ -35,15 +36,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	tunnel, err := dialTCP(*tunnelFlag)
+	if err != nil {
+		log.Fatalf("couldn't connec to tunnel: %v\n", err)
+	}
+
 	for {
 		service, err := dialTCP(*serviceFlag)
 		if err != nil {
 			log.Fatalf("couldn't connect to service: %v\n", err)
-		}
-
-		tunnel, err := dialTCP(*tunnelFlag)
-		if err != nil {
-			log.Fatalf("couldn't connec to tunnel: %v\n", err)
 		}
 
 		ingress := make(chan []byte)
@@ -53,23 +54,22 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer func() {
-				tunnel.CloseRead()
 				close(ingress)
 				wg.Done()
 			}()
 
 			for {
-				buffer := make([]byte, 1024)
-				bytes, err := tunnel.Read(buffer)
+				message, err := protocol.ReadMessage(tunnel)
 				if err != nil {
-					if err != io.EOF {
-						log.Printf("error reading from tunnel: %v\n", err)
-					}
-
+					log.Printf("error reading from tunnel: %v\n", err)
 					return
 				}
 
-				ingress <- buffer[:bytes]
+				if message.Kind == protocol.Data {
+					ingress <- message.Payload
+				} else if message.Kind == protocol.EndOfStream {
+					return
+				}
 			}
 		}()
 
@@ -80,15 +80,10 @@ func main() {
 				wg.Done()
 			}()
 
-			for {
-				message, ok := <-ingress
-				if !ok {
-					return
-				}
-
+			for buffer := range ingress {
 				done := 0
-				for done < len(message) {
-					bytes, err := service.Write(message[done:])
+				for done < len(buffer) {
+					bytes, err := service.Write(buffer[done:])
 					if err != nil {
 						log.Printf("error sending to service: %v\n", err)
 						return
@@ -102,7 +97,6 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer func() {
-				service.CloseRead()
 				close(egress)
 				wg.Done()
 			}()
@@ -125,26 +119,27 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer func() {
-				tunnel.CloseWrite()
 				wg.Done()
 			}()
 
-			for {
-				message, ok := <-egress
-				if !ok {
+			for buffer := range egress {
+				message := protocol.Message{
+					Kind:    protocol.Data,
+					Payload: buffer,
+				}
+
+				if err := message.Write(tunnel); err != nil {
+					log.Printf("error writing to tunnel: %v\n", err)
 					return
 				}
+			}
 
-				done := 0
-				for done < len(message) {
-					bytes, err := tunnel.Write(message[done:])
-					if err != nil {
-						log.Printf("error sending to tunnel: %v\n", err)
-						return
-					}
+			message := protocol.Message{
+				Kind: protocol.EndOfStream,
+			}
 
-					done += bytes
-				}
+			if err := message.Write(tunnel); err != nil {
+				log.Printf("error writing to tunnel: %v\n", err)
 			}
 		}()
 
