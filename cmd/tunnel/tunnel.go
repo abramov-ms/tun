@@ -7,12 +7,10 @@ import (
 	"net"
 	"os"
 	"sync"
+	protocol "tun/internal"
 )
 
-var (
-	tunnelFlag = flag.String("tunnel", "", "Tunnel address")
-	agentFlag  = flag.String("agent", "", "Agent address")
-)
+var tunnelFlag = flag.String("tunnel", "", "Tunnel address")
 
 func listenTCP(addrString string) (*net.TCPListener, error) {
 	addr, err := net.ResolveTCPAddr("tcp", addrString)
@@ -30,7 +28,7 @@ func listenTCP(addrString string) (*net.TCPListener, error) {
 
 func main() {
 	flag.Parse()
-	if *tunnelFlag == "" || *agentFlag == " " {
+	if *tunnelFlag == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -40,151 +38,110 @@ func main() {
 		log.Fatalf("couldn't start tunnel: %v\n", err)
 	}
 
-	agentAddr, err := net.ResolveTCPAddr("tcp", *agentFlag)
+	agent, err := tunnel.AcceptTCP()
 	if err != nil {
-		log.Fatalf("couldn't resolve agent address: %v\n", err)
+		log.Fatalf("couldn't accept agent: %v\n", err)
+	} else {
+		log.Print("agent connected")
 	}
 
 	for {
-		var agent *net.TCPConn
-		agentConnected := make(chan struct{})
-		waitForAgent := func() {
-			_, _ = <-agentConnected
+		client, err := tunnel.AcceptTCP()
+		if err != nil {
+			log.Printf("error accepting connection: %v\n", err)
+			continue
 		}
 
 		var wg sync.WaitGroup
 		ingress := make(chan []byte)
 		egress := make(chan []byte)
-		clientConnected := false
 
-		for {
-			conn, err := tunnel.AcceptTCP()
-			if err != nil {
-				log.Printf("error accepting connection: %v\n", err)
-				continue
-			}
-
-			if conn.RemoteAddr().String() == agentAddr.String() {
-				agent = conn
-				close(agentConnected)
-
-				wg.Add(1)
-				go func() {
-					defer func() {
-						agent.CloseRead()
-						close(egress)
-						wg.Done()
-					}()
-
-					for {
-						buffer := make([]byte, 1024)
-						bytes, err := agent.Read(buffer[:])
-						if err != nil {
-							if err != io.EOF {
-								log.Printf("couldn't read from agent: %v\n", err)
-							}
-
-							return
-						}
-
-						egress <- buffer[:bytes]
-					}
-				}()
-
-				log.Println("connected to agent")
-				continue
-			}
-
-			if clientConnected {
-				conn.Close()
-				log.Print("cannot handle more than one client at once")
-				continue
-			} else {
-				clientConnected = true
-			}
-
-			wg.Add(1)
-			go func(client *net.TCPConn) {
-				waitForAgent()
-				defer func() {
-					client.CloseRead()
-					close(ingress)
-					wg.Done()
-				}()
-
-				for {
-					buffer := make([]byte, 1024)
-					bytes, err := client.Read(buffer[:])
-					if err != nil {
-						if err != io.EOF {
-							log.Printf("couldn't read from client: %v\n", err)
-						}
-
-						return
-					}
-
-					ingress <- buffer[:bytes]
-				}
-			}(conn)
-
-			wg.Add(1)
-			go func() {
-				waitForAgent()
-				defer func() {
-					agent.CloseWrite()
-					wg.Done()
-				}()
-
-				for {
-					message, ok := <-ingress
-					if !ok {
-						return
-					}
-
-					done := 0
-					for done < len(message) {
-						bytes, err := agent.Write(message[done:])
-						if err != nil {
-							log.Printf("error writing to agent: %v\n", err)
-							return
-						}
-
-						done += bytes
-					}
-				}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				close(ingress)
+				wg.Done()
 			}()
 
-			wg.Add(1)
-			go func(client *net.TCPConn) {
-				waitForAgent()
-				defer func() {
-					client.CloseWrite()
-					wg.Done()
-				}()
+			for {
+				buffer := make([]byte, 1024)
+				bytes, err := client.Read(buffer[:])
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("couldn't read from client: %v\n", err)
+					}
 
-				for {
-					message, ok := <-egress
-					if !ok {
+					return
+				}
+
+				ingress <- buffer[:bytes]
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for buffer := range ingress {
+				message := protocol.Message{
+					Kind:    protocol.Data,
+					Payload: buffer,
+				}
+
+				message.Write(agent)
+			}
+
+			message := protocol.Message{
+				Kind: protocol.EndOfStream,
+			}
+
+			message.Write(agent)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer func() {
+				close(egress)
+				wg.Done()
+			}()
+
+			for {
+				message, err := protocol.ReadMessage(agent)
+				if err != nil {
+					log.Printf("couldn't read from agent: %v\n", err)
+					return
+				}
+
+				if message.Kind == protocol.Data {
+					egress <- message.Payload
+				} else if message.Kind == protocol.EndOfStream {
+					return
+				}
+			}
+
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer func() {
+				client.CloseWrite()
+				wg.Done()
+			}()
+
+			for message := range egress {
+				done := 0
+				for done < len(message) {
+					bytes, err := client.Write(message[done:])
+					if err != nil {
+						log.Printf("error writing to client: %v\n", err)
 						return
 					}
 
-					done := 0
-					for done < len(message) {
-						bytes, err := client.Write(message[done:])
-						if err != nil {
-							log.Printf("error writing to client: %v\n", err)
-							return
-						}
-
-						done += bytes
-					}
+					done += bytes
 				}
-			}(conn)
-
-			if agent != nil {
-				wg.Wait()
-				break
 			}
-		}
+		}()
+
+		wg.Wait()
 	}
 }
